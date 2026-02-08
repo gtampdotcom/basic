@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>GWBASIC .PIC Viewer (CGA)</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      background: #111;
+      color: #eee;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 1.5rem;
+    }
+    canvas {
+      border: 2px solid #444;
+      image-rendering: pixelated;
+      background: black;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      justify-content: center;
+    }
+    button, select {
+      background: #222;
+      color: #eee;
+      border: 1px solid #555;
+      padding: 0.35rem 0.6rem;
+      cursor: pointer;
+    }
+    button:hover, select:hover { background: #333; }
+    .info {
+      font-size: 0.85rem;
+      color: #aaa;
+      max-width: 760px;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <h1>GWBASIC .PIC Viewer</h1>
+
+  <input type="file" id="fileInput" accept=".pic" />
+
+  <div class="controls">
+    <select id="modeSelect">
+      <option value="auto">Auto detect</option>
+      <option value="screen1">SCREEN 1 (320×200, 4‑color)</option>
+      <option value="screen2">SCREEN 2 (640×200, mono)</option>
+    </select>
+
+    <select id="paletteSelect">
+      <option value="cm">Cyan / Magenta</option>
+      <option value="rg">Red / Green</option>
+    </select>
+
+    <button id="zoomIn">Zoom +</button>
+    <button id="zoomOut">Zoom −</button>
+    <button id="savePng">Save PNG</button>
+  </div>
+
+  <canvas id="screen"></canvas>
+
+  <div class="info">
+    Supports GWBASIC BSAVE .PIC files. Auto‑detects SCREEN 1 vs SCREEN 2,
+    handles CGA scanline interleaving, palette switching, zoom, and PNG export.
+  </div>
+
+  <script>
+    const canvas = document.getElementById("screen");
+    const ctx = canvas.getContext("2d");
+    const fileInput = document.getElementById("fileInput");
+    const modeSelect = document.getElementById("modeSelect");
+    const paletteSelect = document.getElementById("paletteSelect");
+
+    let zoom = 1;
+    let currentBytes = null;
+    let currentMode = "screen1";
+
+    const PALETTES = {
+      cm: [
+        [0,0,0], [0,255,255], [255,0,255], [255,255,255]
+      ],
+      rg: [
+        [0,0,0], [255,0,0], [0,255,0], [255,255,255]
+      ]
+    };
+
+    document.getElementById("zoomIn").onclick = () => setZoom(zoom + 1);
+    document.getElementById("zoomOut").onclick = () => setZoom(Math.max(1, zoom - 1));
+    document.getElementById("savePng").onclick = savePNG;
+    paletteSelect.onchange = redraw;
+    modeSelect.onchange = redraw;
+
+    function setZoom(z) {
+      zoom = z;
+      canvas.style.width = canvas.width * zoom + "px";
+      canvas.style.height = canvas.height * zoom + "px";
+    }
+
+    fileInput.addEventListener("change", () => {
+      const file = fileInput.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = () => {
+        let bytes = new Uint8Array(reader.result);
+
+        // Strip BSAVE header
+        if (bytes[0] === 0xFD && bytes.length >= 7)
+          bytes = bytes.slice(7);
+
+        currentBytes = bytes;
+        redraw();
+      };
+      reader.readAsArrayBuffer(file);
+    });
+
+    function redraw() {
+      if (!currentBytes) return;
+
+      let mode = modeSelect.value;
+      if (mode === "auto") {
+        mode = currentBytes.length > 10000 ? "screen1" : "screen2";
+      }
+      currentMode = mode;
+
+      if (mode === "screen1") drawScreen1(currentBytes);
+      else drawScreen2(currentBytes);
+
+      setZoom(zoom);
+    }
+
+    // SCREEN 1: 320x200, 4 colors, CGA interleaved
+    function drawScreen1(bytes) {
+      const WIDTH = 320, HEIGHT = 200, BYTES_PER_LINE = 80;
+      canvas.width = WIDTH;
+      canvas.height = HEIGHT;
+
+      const palette = PALETTES[paletteSelect.value];
+      const img = ctx.createImageData(WIDTH, HEIGHT);
+
+      for (let y = 0; y < HEIGHT; y++) {
+        for (let x = 0; x < WIDTH; x += 4) {
+          const offset = (y & 1) * 0x2000 + (y >> 1) * BYTES_PER_LINE + (x >> 2);
+          if (offset >= bytes.length) continue;
+          const b = bytes[offset];
+
+          for (let i = 0; i < 4; i++) {
+            const c = (b >> (6 - i * 2)) & 3;
+            const [r,g,b2] = palette[c];
+            const idx = (y * WIDTH + x + i) * 4;
+            img.data[idx] = r;
+            img.data[idx+1] = g;
+            img.data[idx+2] = b2;
+            img.data[idx+3] = 255;
+          }
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+    }
+
+    // SCREEN 2: 640x200, monochrome, 1bpp, CGA interleaved
+    function drawScreen2(bytes) {
+      const WIDTH = 640, HEIGHT = 200, BYTES_PER_LINE = 80;
+      canvas.width = WIDTH;
+      canvas.height = HEIGHT;
+
+      const img = ctx.createImageData(WIDTH, HEIGHT);
+
+      for (let y = 0; y < HEIGHT; y++) {
+        for (let x = 0; x < WIDTH; x += 8) {
+          const offset = (y & 1) * 0x2000 + (y >> 1) * BYTES_PER_LINE + (x >> 3);
+          if (offset >= bytes.length) continue;
+          const b = bytes[offset];
+
+          for (let i = 0; i < 8; i++) {
+            const on = (b >> (7 - i)) & 1;
+            const idx = (y * WIDTH + x + i) * 4;
+            img.data[idx] = img.data[idx+1] = img.data[idx+2] = on ? 255 : 0;
+            img.data[idx+3] = 255;
+          }
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+    }
+
+    function savePNG() {
+      const a = document.createElement("a");
+      a.href = canvas.toDataURL("image/png");
+      a.download = "image.png";
+      a.click();
+    }
+  </script>
+</body>
+</html>
